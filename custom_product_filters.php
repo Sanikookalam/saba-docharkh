@@ -1,13 +1,24 @@
 <?php
-function custom_product_filters() {
+function custom_product_filters()
+{
     loggg($_SERVER['REQUEST_URI']);
     // Check if we are on a WooCommerce product archive or taxonomy page
     if (!is_shop() && !is_product_category() && !is_product_tag() && !is_product_taxonomy()) {
         return;  // Do not run the code if we are not on these pages
     }
 
-    // Get the current queried object (taxonomy or archive)
-    $current_taxonomy = get_queried_object();
+    // Get the full list of products for the current taxonomy/archive
+    $tax_query = $GLOBALS['wp_query']->tax_query->queries;
+
+    // Get filtered products IDs across the current archive (all pages, not just the current page)
+    $filtered_ids = wc_get_products(array(
+        'limit' => -1,  // Get all products without pagination
+        'return' => 'ids',
+        'paginate' => false,
+        'tax_query' => $tax_query,  // Use the same tax query as the current archive
+    ));
+    loggg("Filtered IDs in cpf: " . print_r($filtered_ids, true));
+    loggg("tax query is in cpf:" . print_r($tax_query, true));
 
     // Get all the product attributes
     $attributes = wc_get_attribute_taxonomies();
@@ -16,60 +27,38 @@ function custom_product_filters() {
         return;
     }
 
-    // Get the full list of products for the current taxonomy/archive
-    $tax_query = $GLOBALS['wp_query']->tax_query->queries;
+    // Get the current taxonomy object (this could be a product category, tag, or custom taxonomy)
+    $queried_object = get_queried_object();
+    // Check if we're on a valid taxonomy archive page
+    if ($queried_object && isset($queried_object->taxonomy)) {
 
-    // Get filtered products IDs across the current archive (all pages, not just the current page)
-    $filtered_ids = wc_get_products(array(
-        'limit'    => -1,  // Get all products without pagination
-        'return'   => 'ids',
-        'paginate' => false,
-        'tax_query' => $tax_query,  // Use the same tax query as the current archive
-    ));
-    loggg("Filtered IDs: " . print_r($filtered_ids, true));
-    loggg("tax query is:". print_r($tax_query , true));
-    // If no products, don't render the filters
-    if (empty($filtered_ids)) {
-        return;
+        // Get the taxonomy and term details
+        $taxonomy = $queried_object->taxonomy;  // The current taxonomy (e.g., 'product_cat' or a custom one)
+        $term_id = $queried_object->term_id;    // The ID of the current term
+
+        // Create the query arguments to fetch products from this taxonomy term
+        $args = array(
+            'post_type' => 'product',
+            'posts_per_page' => -1, // Retrieve all products
+            'fields' => 'ids', // Only get the product IDs, not the full post objects
+            'tax_query' => array(
+                array(
+                    'taxonomy' => $taxonomy, // Use the current taxonomy (e.g., product_cat, custom_tax)
+                    'terms' => $term_id,  // Get products in this term
+                    'field' => 'term_id', // Match the term by its ID
+                    'operator' => 'IN', // Match products in this term
+                ),
+            ),
+        );
+
+        // Perform the query to get product IDs
+        $product_query = new WP_Query($args);
+
+        // Get the product IDs from the query result
+        $all_product_ids = $product_query->posts;
     }
 
-    // Initialize an empty array for the tax_query (for filtering)
-    $tax_query = array();
-
-    // Process filters from the URL (GET parameters)
-    foreach ($attributes as $attribute) {
-        $taxonomy = wc_attribute_taxonomy_name($attribute->attribute_name);
-
-        // If the attribute is present in the URL (GET), process it
-        if (isset($_GET[$taxonomy])) {
-            $terms = explode(',', sanitize_text_field($_GET[$taxonomy]));
-
-            // Add the selected terms to the tax query for filtering
-            $tax_query[] = array(
-                'taxonomy' => $taxonomy,
-                'field'    => 'slug',
-                'terms'    => $terms,
-                'operator' => 'AND',  // Ensure that all selected terms are used in the filtering
-            );
-        }
-    }
-    loggg("tax query is:". print_r($tax_query , true));
-
-    // Fetch the filtered product IDs based on selected filters (if any)
-    $filtered_product_ids = $filtered_ids;
-//	if (!empty($tax_query)) {
-//		$filtered_products = wc_get_products(array(
-//			'limit'    => -1,  // Get all filtered products
-//			'return'   => 'ids',
-//			'paginate' => false,
-//			'tax_query' => array_merge(array('relation' => 'AND'), $tax_query),
-//		));
-//		//loggg($tax_query);
-//		//loggg(array_merge(array('relation' => 'AND'), $tax_query));
-//
-//		// Update the filtered product IDs
-//		$filtered_product_ids = $filtered_products;
-//	}
+    loggg("all product ids are:" . print_r($all_product_ids, true));
 
     // Now display the filters, ensuring we show all attributes even if one is already filtered
     echo '<div class="custom-product-filters">';
@@ -81,14 +70,14 @@ function custom_product_filters() {
 
         // Fetch terms for the current attribute that are associated with the filtered product IDs
         $terms = get_terms(array(
-            'taxonomy'   => $taxonomy,
+            'taxonomy' => $taxonomy,
             'hide_empty' => true,
-            'object_ids' => $filtered_ids,  // Show all terms associated with products in this taxonomy
+            'object_ids' => $all_product_ids,  // Show all terms associated with all products in this taxonomy
         ));
 
         if (!empty($terms) && !is_wp_error($terms)) {
             $accordion_id = 'filter-group-' . $index;
-            $collapse_id  = 'collapse-' . $index;
+            $collapse_id = 'collapse-' . $index;
 
             echo '<div class="accordion-item ' . $attribute->attribute_name . '">';
             echo '<div class="accordion-header" id="' . $accordion_id . '">';
@@ -176,18 +165,29 @@ function custom_woocommerce_product_query($query)
 
                 $tax_query[] = array(
                     'taxonomy' => $taxonomy,
-                    'field'    => 'slug',
-                    'terms'    => $terms,
+                    'field' => 'slug',
+                    'terms' => $terms,
                 );
             }
         }
+        loggg("tax query is:" . print_r($tax_query, true));
 
         // Add tax_query to the query
         if (!empty($tax_query)) {
             $tax_query['relation'] = 'AND';
             $query->set('tax_query', $tax_query);
         }
+        // Get filtered products IDs across the current archive (all pages, not just the current page)
+        $filtered_ids = wc_get_products(array(
+            'limit' => -1,  // Get all products without pagination
+            'return' => 'ids',
+            'paginate' => false,
+            'tax_query' => $tax_query,  // Use the same tax query as the current archive
+        ));
+        loggg("filtered ids before query is:" . print_r($filtered_ids, true));
+
+
     }
 }
 
-add_action('pre_get_posts', 'custom_woocommerce_product_query', 9999999999999999);
+add_action('pre_get_posts', 'custom_woocommerce_product_query', 999);
